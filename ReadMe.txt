@@ -1,5 +1,8 @@
 # FakeNewsDetection
 
+Link for the App
+https://fakenewsdetector-ufof8jqirphctyhfoa6egd.streamlit.app/
+
 Simple Fake News Detection demo using TF-IDF + Logistic Regression and Streamlit.
 
 ## Quick run (local)

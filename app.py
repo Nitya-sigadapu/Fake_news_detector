@@ -4,13 +4,23 @@ import joblib, os, re
 import numpy as np
 from PIL import Image
 
-# Try to import nltk functions but degrade gracefully if not present
+# Try to import nltk functions and ensure required data is available
 try:
+    import nltk
     from nltk.tokenize import word_tokenize
     from nltk.corpus import stopwords
+
+    # Ensure required corpora exist (download only if missing)
+    for corpus in ("stopwords", "punkt"):
+        try:
+            nltk.data.find(f"corpora/{corpus}")
+        except LookupError:
+            nltk.download(corpus, quiet=True)
+
 except Exception:
     word_tokenize = None
     stopwords = None
+
 
 st.set_page_config(page_title="Fake News Detector", layout="wide")
 st.title("📰 Fake News Detector")

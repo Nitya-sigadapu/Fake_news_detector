@@ -4,6 +4,5 @@ __pycache__/
 .env
 .venv/
 venv/
-models/*.joblib
 *.pyc
 ershpDesktopFakeNewsDet

@@ -1,5 +1,3 @@
-
-
 import os
 import re
 import sys
@@ -8,6 +6,7 @@ import joblib
 import traceback
 import pandas as pd
 import numpy as np
+from datetime import datetime
 
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -25,18 +24,14 @@ THRESH_OUT = os.path.join(MODELS_DIR, "threshold.json")
 RANDOM_STATE = 42
 
 os.makedirs(MODELS_DIR, exist_ok=True)
+np.random.seed(RANDOM_STATE)
 
 # ---------- robust CSV loader ----------
 def robust_read_csv(path, encodings=None, **kwargs):
-    """
-    Try a list of encodings to read the CSV and return a DataFrame.
-    Falls back to a 'replace' decoding strategy if all encodings fail.
-    """
     encodings = encodings or ["utf-8", "utf-8-sig", "cp1252", "latin1", "iso-8859-1"]
     last_err = None
     for enc in encodings:
         try:
-            # python engine can be more tolerant for weird CSV formatting
             df = pd.read_csv(path, encoding=enc, engine="python", **kwargs)
             print(f"[train_model] read CSV using encoding: {enc}")
             return df
@@ -44,7 +39,6 @@ def robust_read_csv(path, encodings=None, **kwargs):
             last_err = e
             print(f"[train_model] encoding {enc} failed: {e!r}")
 
-    # Try to detect encoding via charset_normalizer if installed (optional)
     try:
         from charset_normalizer import from_path
         result = from_path(path).best()
@@ -58,10 +52,8 @@ def robust_read_csv(path, encodings=None, **kwargs):
                 last_err = e
                 print(f"[train_model] detected encoding {detected_enc} failed: {e!r}")
     except Exception:
-        # not installed or detection failed — continue to final fallback
         pass
 
-    # Final fallback: read raw bytes and decode replacing invalid chars so file loads
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -73,7 +65,6 @@ def robust_read_csv(path, encodings=None, **kwargs):
         last_err = e
         print(f"[train_model] final fallback failed: {e!r}")
 
-    # nothing worked — raise a clear error
     raise RuntimeError(f"Could not read CSV {path}. Last error: {last_err!r}")
 
 # ---------- simple cleaner ----------
@@ -86,16 +77,14 @@ def simple_clean(text):
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-# ---------- training pipeline (function) ----------
-def train_and_save(data_path=DATA_PATH):
+# ---------- training pipeline ----------
+def train_and_save(data_path=DATA_PATH, save_timestamp=False):
     print("Loading data from:", data_path)
     df = robust_read_csv(data_path)
 
-    # basic column checks
     if "label" not in df.columns or "text" not in df.columns:
         raise ValueError("CSV must contain 'text' and 'label' columns.")
 
-    # safer label mapping: handle common label variants
     if df["label"].dtype == object or df["label"].dtype == "O":
         df["label"] = (
             df["label"].astype(str)
@@ -108,7 +97,6 @@ def train_and_save(data_path=DATA_PATH):
             })
         )
 
-    # if mapping produced NaNs, try fallback inference
     if df["label"].isna().any():
         def infer_label(x):
             s = str(x).lower()
@@ -122,21 +110,17 @@ def train_and_save(data_path=DATA_PATH):
                 return np.nan
         df["label"] = df["label"].fillna(df["label"].apply(infer_label))
 
-    # final check
     if df["label"].isna().any():
         sample_bad = df.loc[df['label'].isna(), 'label'].unique()[:10]
         raise ValueError("Could not map some labels to 0/1. Sample problematic labels: " + str(sample_bad))
 
-    # ensure numeric labels
     df["label"] = df["label"].astype(int)
-
     df["text"] = df["text"].fillna("").astype(str)
     df["clean_text"] = df["text"].apply(simple_clean)
 
     X = df["clean_text"].values
     y = df["label"].values
 
-    # train/val/test split
     X_train, X_temp, y_train, y_temp = train_test_split(
         X, y, test_size=0.30, random_state=RANDOM_STATE, stratify=y
     )
@@ -145,8 +129,6 @@ def train_and_save(data_path=DATA_PATH):
     )
     print("Sizes — train/val/test:", len(X_train), len(X_val), len(X_test))
 
-
-    # vectorizer (word unigrams + bigrams)
     vectorizer = TfidfVectorizer(
         max_features=30000,
         ngram_range=(1,2),
@@ -160,7 +142,6 @@ def train_and_save(data_path=DATA_PATH):
     X_val_vec = vectorizer.transform(X_val)
     X_test_vec = vectorizer.transform(X_test)
 
-    # Logistic Regression (grid search for C)
     print("Training Logistic Regression with GridSearchCV...")
     param_grid = {"C": [0.01, 0.1, 0.5, 1.0, 5.0]}
     lr = LogisticRegression(solver="liblinear", class_weight="balanced", max_iter=1000, random_state=RANDOM_STATE)
@@ -169,10 +150,8 @@ def train_and_save(data_path=DATA_PATH):
     best_lr = gs.best_estimator_
     print("Best LR params:", gs.best_params_)
 
-    # Validation probs -> choose threshold for FAKE (label=1)
     val_probs = best_lr.predict_proba(X_val_vec)[:, 1]
     prec, rec, thr = precision_recall_curve(y_val, val_probs)
-    # thr has length = len(prec) - 1 ; compute F1 for thresholds only
     if len(thr) > 0:
         f1_for_thr = 2 * (prec[:-1] * rec[:-1]) / (prec[:-1] + rec[:-1] + 1e-12)
         best_idx = int(np.nanargmax(f1_for_thr))
@@ -181,17 +160,19 @@ def train_and_save(data_path=DATA_PATH):
         best_threshold = 0.5
     print("Best threshold (val) for FAKE by F1:", best_threshold)
 
-    # Evaluate on test set (LR)
     test_probs = best_lr.predict_proba(X_test_vec)[:, 1]
     y_test_pred = (test_probs >= best_threshold).astype(int)
     print("Test classification report (LR):")
     print(classification_report(y_test, y_test_pred))
+
     try:
-        print("Test ROC AUC (LR):", roc_auc_score(y_test, test_probs))
+        if len(np.unique(y_test)) > 1:
+            print("Test ROC AUC (LR):", roc_auc_score(y_test, test_probs))
+        else:
+            print("[train_model] ROC AUC skipped: only one class present in test labels.")
     except Exception as e:
         print("[train_model] ROC AUC failed:", e)
 
-    # Train MultinomialNB
     print("Training MultinomialNB...")
     nb = MultinomialNB()
     nb.fit(X_train_vec, y_train)
@@ -199,36 +180,61 @@ def train_and_save(data_path=DATA_PATH):
     y_test_pred_nb = (nb_test_probs >= best_threshold).astype(int)
     print("Test classification report (NB):")
     print(classification_report(y_test, y_test_pred_nb))
+
     try:
-        print("Test ROC AUC (NB):", roc_auc_score(y_test, nb_test_probs))
+        if len(np.unique(y_test)) > 1:
+            print("Test ROC AUC (NB):", roc_auc_score(y_test, nb_test_probs))
+        else:
+            print("[train_model] NB ROC AUC skipped: only one class present in test labels.")
     except Exception as e:
         print("[train_model] NB ROC AUC failed:", e)
 
-    # Save vectorizer and models (with compression)
+    # optional timestamping
+    if save_timestamp:
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        vec_out = VEC_OUT.replace(".joblib", f".{ts}.joblib")
+        lr_out = LR_OUT.replace(".joblib", f".{ts}.joblib")
+        nb_out = NB_OUT.replace(".joblib", f".{ts}.joblib")
+        thresh_out = THRESH_OUT.replace(".json", f".{ts}.json")
+    else:
+        vec_out, lr_out, nb_out, thresh_out = VEC_OUT, LR_OUT, NB_OUT, THRESH_OUT
+
     print("Saving vectorizer and models...")
     try:
-        joblib.dump(vectorizer, VEC_OUT, compress=3)
-        joblib.dump(best_lr, LR_OUT, compress=3)
-        joblib.dump(nb, NB_OUT, compress=3)
-        with open(THRESH_OUT, "w") as f:
+        joblib.dump(vectorizer, vec_out, compress=3)
+        joblib.dump(best_lr, lr_out, compress=3)
+        joblib.dump(nb, nb_out, compress=3)
+        with open(thresh_out, "w") as f:
             json.dump({"prob_fake_threshold": best_threshold}, f, indent=2)
     except Exception as e:
         print("[train_model] ERROR saving models:", e)
         traceback.print_exc()
         raise
 
-    print("Saved:", VEC_OUT, LR_OUT, NB_OUT, THRESH_OUT)
-    return True
+    print("Saved:", vec_out, lr_out, nb_out, thresh_out)
+    return {
+        "vec": vec_out,
+        "lr": lr_out,
+        "nb": nb_out,
+        "threshold": best_threshold
+    }
 
-# ---------- only run training when the script is executed directly ----------
+
 if __name__ == "__main__":
     dp = DATA_PATH
+    save_ts = False
     if len(sys.argv) > 1:
         dp = sys.argv[1]
+    if "--save-ts" in sys.argv:
+        save_ts = True
     try:
-        train_and_save(dp)
+        result = train_and_save(dp, save_timestamp=save_ts)
+        print("Training finished. Summary:", result)
     except Exception as e:
         print("[train_model] ERROR:", e)
         traceback.print_exc()
         raise
 
+
+
+          

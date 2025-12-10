@@ -1,12 +1,4 @@
-#!/usr/bin/env python3
-# train_model.py
-"""
-Safe training script:
- - robust CSV reader (tries multiple encodings + optional detector + fallback)
- - training logic (TF-IDF + Logistic Regression with GridSearch + MultinomialNB)
- - computes validation-based threshold and saves models + threshold.json
- - training only runs when executed directly (not on import)
-"""
+
 
 import os
 import re

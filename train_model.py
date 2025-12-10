@@ -153,6 +153,7 @@ def train_and_save(data_path=DATA_PATH):
     )
     print("Sizes — train/val/test:", len(X_train), len(X_val), len(X_test))
 
+
     # vectorizer (word unigrams + bigrams)
     vectorizer = TfidfVectorizer(
         max_features=30000,
@@ -238,4 +239,4 @@ if __name__ == "__main__":
         print("[train_model] ERROR:", e)
         traceback.print_exc()
         raise
-
+>>>>>>> e675a0b (Add dataset and trained models; update train script)
